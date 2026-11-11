@@ -11,13 +11,15 @@ permissions:
 
 jobs:
   check-upstream:
-    runs-on: ubuntu-latest
+    # 固定 Ubuntu 24.04：ubuntu-latest 将于 2026-10-19 起迁移至 Ubuntu 26，
+    # 定时构建依赖 emcc/CMake 工具链行为，锁定镜像保证可复现。
+    runs-on: ubuntu-24.04
     outputs:
       has_update: ${{ steps.compare.outputs.has_update }}
       upstream_version: ${{ steps.get-version.outputs.version }}
     steps:
       - name: Checkout 本仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 获取上游最新版本标识
         id: get-version
@@ -41,10 +43,10 @@ jobs:
   build-wasm:
     needs: check-upstream
     if: needs.check-upstream.outputs.has_update == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout 本仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 下载指定版本的源码
         run: |
@@ -54,7 +56,8 @@ jobs:
           tar -xzf cubiomes.tar.gz -C cubiomes-src --strip-components=1
 
       - name: 安装 Emscripten
-        uses: mymindstorm/setup-emsdk@v14
+        # setup-emsdk 已由 mymindstorm 迁移至 emscripten-core 官方维护，v15 基于 Node 24
+        uses: emscripten-core/setup-emsdk@v15
         with:
           version: "3.1.51" # 务必锁定版本，保证构建可复现
 
