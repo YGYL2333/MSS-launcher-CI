@@ -1,0 +1,195 @@
+name: Build cubiomes WASM (latest upstream)
+
+on:
+  schedule:
+    # 每天 UTC 00:00 运行一次（可根据需要调整频率）
+    - cron: "0 0 * * *"
+  workflow_dispatch: # 允许手动触发，方便调试
+
+permissions:
+  contents: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      has_update: ${{ steps.compare.outputs.has_update }}
+      upstream_version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - name: Checkout 本仓库
+        uses: actions/checkout@v4
+
+      - name: 获取上游最新版本标识
+        id: get-version
+        run: |
+          # 直接追踪活跃分支的 master 提交
+          VERSION=$(curl -sL "https://api.github.com/repos/xpple/cubiomes/commits/master" | jq -r '.sha')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "xpple/cubiomes 最新 commit: $VERSION"
+
+      - name: 对比已记录版本
+        id: compare
+        run: |
+          SAVED=$(cat .cubiomes-version 2>/dev/null || echo "none")
+          CURRENT="${{ steps.get-version.outputs.version }}"
+          if [ "$SAVED" != "$CURRENT" ]; then
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-wasm:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.has_update == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 本仓库
+        uses: actions/checkout@v4
+
+      - name: 下载指定版本的源码
+        run: |
+          VERSION="${{ needs.check-upstream.outputs.upstream_version }}"
+          curl -sL "https://api.github.com/repos/xpple/cubiomes/tarball/$VERSION" -o cubiomes.tar.gz
+          mkdir -p cubiomes-src
+          tar -xzf cubiomes.tar.gz -C cubiomes-src --strip-components=1
+
+      - name: 安装 Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: "3.1.51" # 务必锁定版本，保证构建可复现
+
+      - name: 用 CMake 构建 cubiomes 静态库 (产出 finders.o 等目标文件)
+        run: |
+          # 上游 xpple/cubiomes 无 Makefile，构建系统是 CMakeLists.txt。
+          # 仅构建静态库目标 cubiomes_static：其 SOURCES 列表显式包含
+          # finders.c 与 generator.c，比旧 find 方案（靠黑名单排除 tests.c/main）更稳。
+          # tests/ 子目录只在配置时登记测试可执行文件，本目标不会编译它们。
+          cd cubiomes-src
+          emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target cubiomes_static -j "$(nproc)"
+
+      - name: 校验 finders.o / generator.o 已产出并入库
+        run: |
+          LIB=cubiomes-src/build/libcubiomes_static.a
+          test -f "$LIB" || { echo "未生成 $LIB"; exit 1; }
+          echo "===== 静态库成员 ====="
+          ar t "$LIB" | sort
+          # bridge.c -> find_structures() 依赖 finders.c:
+          #   getStructureConfig / getStructurePos / isViableStructurePos
+          # .o 命名随生成器而异（finders.c.o / finders.o），用宽松匹配避免误报
+          ar t "$LIB" | grep -Eq '(^|/)finders(\.c)?\.o$' \
+            || { echo "finders 目标文件缺失，结构 API 将链接失败"; exit 1; }
+          # bridge.c -> gen_biomes_tile() 依赖 generator.c:
+          #   setupGenerator / getMinCacheSize / genBiomes
+          ar t "$LIB" | grep -Eq '(^|/)generator(\.c)?\.o$' \
+            || { echo "generator 目标文件缺失，群系 API 将链接失败"; exit 1; }
+
+      - name: 编译 bridge 并链接为 WASM
+        run: |
+          # 先清空再重建，避免 emcc 链接失败时残留半成品（否则可能被后续
+          # 上传/校验步骤误当成有效产物）；产物要么本次完整，要么不存在。
+          rm -rf dist && mkdir -p dist
+          # 头文件来自 cubiomes-src（bridge.c 内含 generator.h/biomes.h/finders.h），
+          # cubiomes 目标文件全部取自上面的静态库，确保 finders.o、generator.o 被纳入。
+          # EXPORTED_FUNCTIONS 与 bridge.c 的 EMSCRIPTEN_KEEPALIVE 入口一一对应，
+          # 分别封装新版 genBiomes（群系）与 getStructurePos/isViableStructurePos（结构）。
+          emcc -O3 \
+            bridge/bridge.c \
+            cubiomes-src/build/libcubiomes_static.a \
+            -Icubiomes-src \
+            -o dist/cubiomes.js \
+            -s WASM=1 \
+            -s EXPORTED_FUNCTIONS='["_set_seed","_gen_biomes_tile","_get_biome_buf","_find_structures","_get_struct_buf"]' \
+            -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
+            -s MODULARIZE=1 \
+            -s EXPORT_NAME='CubiomesModule' \
+            -s ALLOW_MEMORY_GROWTH=1
+
+      - name: 上传产物到 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="wasm-latest"
+          SHA="${{ needs.check-upstream.outputs.upstream_version }}"
+          test -f dist/cubiomes.js   || { echo "缺少 dist/cubiomes.js"; exit 1; }
+          test -f dist/cubiomes.wasm || { echo "缺少 dist/cubiomes.wasm"; exit 1; }
+          # 滚动发布：tag 不存在则创建 prerelease，存在则用 --clobber 覆盖同名资产，
+          # 因此仓库历史不再累积二进制，产物只保留最新一份于 Release。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "${{ github.sha }}" \
+              --title "cubiomes WASM (rolling)" \
+              --prerelease \
+              --notes "自动构建的 cubiomes WASM。上游 xpple/cubiomes commit: ${SHA}。下载入口见仓库内 wasm/latest.json。"
+          fi
+          gh release upload "$TAG" dist/cubiomes.js dist/cubiomes.wasm --clobber
+
+      - name: 生成 wasm/latest.json 元数据 (指向 Release 下载 URL)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="wasm-latest"
+          SHA="${{ needs.check-upstream.outputs.upstream_version }}"
+          EMSDK_VER="$(emcc -dumpversion)"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ASSET_BASE="${{ github.server_url }}/${{ github.repository }}/releases/download/${TAG}"
+          RELEASE_URL="${{ github.server_url }}/${{ github.repository }}/releases/tag/${TAG}"
+          js_url="$ASSET_BASE/cubiomes.js"
+          wasm_url="$ASSET_BASE/cubiomes.wasm"
+          js_sha="$(sha256sum dist/cubiomes.js   | cut -d' ' -f1)"
+          wasm_sha="$(sha256sum dist/cubiomes.wasm | cut -d' ' -f1)"
+          js_size="$(stat -c%s dist/cubiomes.js)"
+          wasm_size="$(stat -c%s dist/cubiomes.wasm)"
+          # 用已认证的 gh 校验资产确实挂到了 Release 上。
+          assets="$(gh release view "$TAG" --json assets -q '.assets[].name')"
+          echo "===== Release '$TAG' 资产 ====="
+          echo "$assets"
+          echo "$assets" | grep -qx 'cubiomes.js'   || { echo "Release 缺少 cubiomes.js 资产"; exit 1; }
+          echo "$assets" | grep -qx 'cubiomes.wasm' || { echo "Release 缺少 cubiomes.wasm 资产"; exit 1; }
+          # 导出入口列表与 EXPORTED_FUNCTIONS 一致（去掉前导下划线）
+          jq -n \
+            --arg upstream "xpple/cubiomes" \
+            --arg commit "$SHA" \
+            --arg commitUrl "https://github.com/xpple/cubiomes/commit/$SHA" \
+            --arg emscripten "$EMSDK_VER" \
+            --arg builtAt "$BUILT_AT" \
+            --arg runId "${{ github.run_id }}" \
+            --arg tag "$TAG" \
+            --arg releaseUrl "$RELEASE_URL" \
+            --arg jsUrl "$js_url"     --arg jsSha "$js_sha"     --argjson jsSize "$js_size" \
+            --arg wasmUrl "$wasm_url" --arg wasmSha "$wasm_sha" --argjson wasmSize "$wasm_size" \
+            '{
+              upstream: $upstream,
+              commit: $commit,
+              commitUrl: $commitUrl,
+              emscripten: $emscripten,
+              builtAt: $builtAt,
+              runId: $runId,
+              exports: ["set_seed","gen_biomes_tile","get_biome_buf","find_structures","get_struct_buf"],
+              release: { tag: $tag, url: $releaseUrl },
+              files: {
+                "cubiomes.js":   { downloadUrl: $jsUrl,   sha256: $jsSha,   size: $jsSize },
+                "cubiomes.wasm": { downloadUrl: $wasmUrl, sha256: $wasmSha, size: $wasmSize }
+              }
+            }' > wasm/latest.json
+          echo "===== wasm/latest.json ====="
+          cat wasm/latest.json
+
+      - name: 更新版本标记 .cubiomes-version
+        run: |
+          # 供下次 check-upstream 对比；仅在本次构建成功后才写，避免半成品标记
+          echo "${{ needs.check-upstream.outputs.upstream_version }}" > .cubiomes-version
+
+      - name: 提交并推送元数据 (不含二进制产物)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 仅提交轻量文本：产物已进 Release，仓库不再跟踪 dist/
+          git add wasm/latest.json .cubiomes-version
+          if git diff --cached --quiet; then
+            echo "无元数据变更，跳过提交"
+            exit 0
+          fi
+          git commit -m "chore(wasm): update metadata @ ${{ needs.check-upstream.outputs.upstream_version }}"
+          # 定时任务可能与手动触发并发，先 rebase 拉取降低推送冲突
+          git pull --rebase --autostash
+          git push

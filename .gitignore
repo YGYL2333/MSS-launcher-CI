@@ -1,0 +1,11 @@
+# 本地开发用的 cubiomes 参考副本，不纳入版本控制（CI 会另行下载 cubiomes-src）
+cubiomes-master/
+
+# WASM 二进制产物改由 GitHub Release (tag: wasm-latest) 分发，仓库不再跟踪，
+# 以免历史体积随每次上游更新持续增长。软件端通过 wasm/latest.json 里的
+# downloadUrl 拉取，并用 sha256 校验完整性。
+dist/
+
+# CI 运行时下载的 cubiomes 源码与 CMake 中间产物
+cubiomes-src/
+build/
