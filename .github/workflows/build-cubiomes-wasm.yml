@@ -94,15 +94,14 @@ jobs:
           rm -rf dist && mkdir -p dist
           # 头文件来自 cubiomes-src（bridge.c 内含 generator.h/biomes.h/finders.h），
           # cubiomes 目标文件全部取自上面的静态库，确保 finders.o、generator.o 被纳入。
-          # EXPORTED_FUNCTIONS 与 bridge.c 的 EMSCRIPTEN_KEEPALIVE 入口一一对应，
-          # 分别封装新版 genBiomes（群系）与 getStructurePos/isViableStructurePos（结构）。
+          # EXPORTED_FUNCTIONS 与 bridge.c 的 EMSCRIPTEN_KEEPALIVE 入口一一对应。
           emcc -O3 \
             bridge/bridge.c \
             cubiomes-src/build/libcubiomes_static.a \
             -Icubiomes-src \
             -o dist/cubiomes.js \
             -s WASM=1 \
-            -s EXPORTED_FUNCTIONS='["_set_seed","_gen_biomes_tile","_get_biome_buf","_find_structures","_get_struct_buf"]' \
+            -s EXPORTED_FUNCTIONS='["_set_seed","_gen_biomes_tile","_get_biome_buf","_find_structures","_get_struct_buf","_mc_version_to_str","_mc_str_to_version","_get_supported_versions","_get_supported_versions_buf","_dim_to_str","_get_supported_dimensions","_get_supported_dimensions_buf","_struct_to_str","_get_supported_structures","_get_supported_structures_buf","_biome_to_str","_get_supported_biomes","_get_supported_biomes_buf"]' \
             -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
             -s MODULARIZE=1 \
             -s EXPORT_NAME='CubiomesModule' \
@@ -167,7 +166,7 @@ jobs:
               emscripten: $emscripten,
               builtAt: $builtAt,
               runId: $runId,
-              exports: ["set_seed","gen_biomes_tile","get_biome_buf","find_structures","get_struct_buf"],
+              exports: ["set_seed","gen_biomes_tile","get_biome_buf","find_structures","get_struct_buf","mc_version_to_str","mc_str_to_version","get_supported_versions","get_supported_versions_buf","dim_to_str","get_supported_dimensions","get_supported_dimensions_buf","struct_to_str","get_supported_structures","get_supported_structures_buf","biome_to_str","get_supported_biomes","get_supported_biomes_buf"],
               release: { tag: $tag, url: $releaseUrl },
               files: {
                 "cubiomes.js":   { downloadUrl: $jsUrl,   sha256: $jsSha,   size: $jsSize },

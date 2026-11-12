@@ -10,7 +10,7 @@
 - 模块形态：`MODULARIZE=1` + `EXPORT_NAME='CubiomesModule'`（工厂函数）
 - 内存：`ALLOW_MEMORY_GROWTH=1`（堆可增长，TypedArray 视图会失效）
 - 运行时方法：额外导出 `ccall`、`cwrap`
-- 导出 C 函数：`set_seed`、`gen_biomes_tile`、`get_biome_buf`、`find_structures`、`get_struct_buf`
+- 导出 C 函数：核心 `set_seed`、`gen_biomes_tile`、`get_biome_buf`、`find_structures`、`get_struct_buf`；枚举查询 `mc_version_to_str`/`mc_str_to_version`/`get_supported_versions`(+`_buf`)、`dim_to_str`/`get_supported_dimensions`(+`_buf`)、`struct_to_str`/`get_supported_structures`(+`_buf`)、`biome_to_str`/`get_supported_biomes`(+`_buf`)
 
 ---
 
@@ -53,30 +53,31 @@ const mod = await CubiomesModule({
 // mod.ccall / mod.cwrap 也已导出，可用于更底层的调用
 ```
 
-| 环境       | 获取工厂函数                                                | 备注                                            |
-| ---------- | ----------------------------------------------------------- | ----------------------------------------------- |
-| 浏览器     | `<script src="cubiomes.js">` 后取全局 `CubiomesModule`      | 走 CSP 需 `wasm-unsafe-eval`                    |
-| Node.js    | `require('./cubiomes.js')`                                  | 产物挂了 CommonJS 导出                          |
-| ESM        | `createRequire` 引入，或将文件重命名为 `.cjs`               | 直接 `import` 裸 `.js` 可能因 CJS 格式报错      |
-| Web Worker | Worker 内 `importScripts('cubiomes.js')` 后同样 `await` 工厂 | 每个 Worker 持有独立实例，可多核并行            |
+| 环境       | 获取工厂函数                                                 | 备注                                       |
+| ---------- | ------------------------------------------------------------ | ------------------------------------------ |
+| 浏览器     | `<script src="cubiomes.js">` 后取全局 `CubiomesModule`       | 走 CSP 需 `wasm-unsafe-eval`               |
+| Node.js    | `require('./cubiomes.js')`                                   | 产物挂了 CommonJS 导出                     |
+| ESM        | `createRequire` 引入，或将文件重命名为 `.cjs`                | 直接 `import` 裸 `.js` 可能因 CJS 格式报错 |
+| Web Worker | Worker 内 `importScripts('cubiomes.js')` 后同样 `await` 工厂 | 每个 Worker 持有独立实例，可多核并行       |
 
 `cubiomes.js` 与 `cubiomes.wasm` 建议同目录放置；跨域加载时 Release 资产域名
 带 CORS 头，可直接 `fetch`。
 
 ---
 
-## 2. `set_seed(mc_version, seed_hi, seed_lo) => void`
+## 2. `set_seed(mc_version, dim, seed_hi, seed_lo) => void`
 
 初始化（或复用）生成器并应用种子。这是**唯一携带版本/种子状态**的入口，
 后续所有查询都基于它。
 
 ### 参数
 
-| 参数       | 类型   | 含义                                                                                                                       |
-| ---------- | ------ | -------------------------------------------------------------------------------------------------------------------------- |
-| mc_version | number | Minecraft 版本 ID，取自上游 `enum MCVersion` 的枚举序号，见 [§7 版本对照表](#7-常量对照表mc_version)。改动它会重建生成器。 |
-| seed_hi    | number | 64 位种子的**高 32 位**（按有符号 int32 传入，保留位模式即可）。                                                             |
-| seed_lo    | number | 64 位种子的**低 32 位**。                                                                                                    |
+| 参数       | 类型   | 含义                                                                                                                            |
+| ---------- | ------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| mc_version | number | Minecraft 版本 ID，取自上游 `enum MCVersion` 的枚举序号，见 [§7 版本对照表](#7-常量对照表mc_version)。改动它会重建生成器。      |
+| dim        | number | 维度，取自上游 `enum Dimension`：`-1`=下界、`0`=主世界、`+1`=末地。非法值回退主世界；切换维度只重新 `applySeed`，不重建生成器。 |
+| seed_hi    | number | 64 位种子的**高 32 位**（按有符号 int32 传入，保留位模式即可）。                                                                |
+| seed_lo    | number | 64 位种子的**低 32 位**。                                                                                                       |
 
 C 侧重建：`seed = ((uint64)seed_hi << 32) | (uint32)seed_lo`。之所以拆成两半，
 是因为 Emscripten 导出函数在 JS 侧传 int64 不便且易丢精度。
@@ -84,7 +85,7 @@ C 侧重建：`seed = ((uint64)seed_hi << 32) | (uint32)seed_lo`。之所以拆�
 ### 返回
 
 无返回值（`void`）。调用即完成 `setupGenerator`（首次或版本变化时）与
-`applySeed(DIM_OVERWORLD, seed)`。
+`applySeed(dim, seed)`。
 
 ### 种子拆分（务必用 BigInt 保留位模式）
 
@@ -92,17 +93,23 @@ JS 的 `number` 是浮点，直接用 `Math.floor` 拆大整数会丢精度；�
 正确处理。统一用 `BigInt.asUintN(64, ...)` 归一到无符号 64 位再高低拆分：
 
 ```js
-function setSeed(mod, mcVersion, seed /* number | bigint */) {
+function setSeed(mod, mcVersion, seed /* number | bigint */, dim = 0) {
   const s = BigInt.asUintN(64, BigInt(seed)); // 支持负数，如 -12345
-  mod._set_seed(mcVersion, Number(s >> 32n) | 0, Number(s & 0xffffffffn) | 0);
+  mod._set_seed(
+    mcVersion,
+    dim,
+    Number(s >> 32n) | 0,
+    Number(s & 0xffffffffn) | 0,
+  );
 }
-setSeed(mod, 33, -12345); // 33 = MC_1_21_11（1.21 别名）
+setSeed(mod, 33, -12345); // 33 = MC_1_21_11（1.21 别名），dim=0 主世界
 ```
 
 ### 约束
 
-- **维度固定为主世界**：桥接层把 `DIM_OVERWORLD` 硬编码在 C 侧，接口没有
-  维度参数。要下界/末地须改 `bridge/bridge.c` 新增入口并重新构建。
+- **维度可选但采样面固定**：`set_seed` 的 `dim` 支持 `-1` 下界 / `0` 主世界 /
+  `+1` 末地（非法值回退主世界），切换维度只重新 `applySeed`、不重建 Generator；
+  但 `gen_biomes_tile` 仍固定单层 `y=63`、`scale=4`，下界/末地的垂直分层需另行扩展。
 - 切换 `mc_version` 会自动重建 Generator，无需手动释放；相同版本重复调用
   只重设种子，开销小。
 
@@ -115,12 +122,12 @@ setSeed(mod, 33, -12345); // 33 = MC_1_21_11（1.21 别名）
 
 ### 参数（全部为**瓦片坐标**，非方块坐标）
 
-| 参数 | 类型   | 含义                                                                   |
-| ---- | ------ | ---------------------------------------------------------------------- |
-| x    | number | 矩形起点 X（1:4 缩放后的瓦片坐标）                                     |
-| z    | number | 矩形起点 Z（瓦片坐标）                                                 |
-| sx   | number | 水平方向瓦片数，须 `> 0`                                               |
-| sz   | number | 垂直方向瓦片数，须 `> 0`                                               |
+| 参数 | 类型   | 含义                               |
+| ---- | ------ | ---------------------------------- |
+| x    | number | 矩形起点 X（1:4 缩放后的瓦片坐标） |
+| z    | number | 矩形起点 Z（瓦片坐标）             |
+| sx   | number | 水平方向瓦片数，须 `> 0`           |
+| sz   | number | 垂直方向瓦片数，须 `> 0`           |
 
 > `scale=4` 下每个数组元素代表 **4×4 方块**。方块坐标 = 瓦片坐标 × 4。
 > 例：`sx=64` 覆盖 `64 × 4 = 256` 方块宽。
@@ -136,8 +143,8 @@ setSeed(mod, 33, -12345); // 33 = MC_1_21_11（1.21 别名）
 ```js
 const count = mod._gen_biomes_tile(-128, -128, 64, 64);
 if (count > 0) {
-  const ptr = mod._get_biome_buf();          // 堆指针（字节地址）
-  const i32 = ptr >> 2;                        // 转 Int32 下标
+  const ptr = mod._get_biome_buf(); // 堆指针（字节地址）
+  const i32 = ptr >> 2; // 转 Int32 下标
   // 每次重新取视图：内存增长后旧的 mod.HEAP32 已 detached
   const biomes = mod.HEAP32.slice(i32, i32 + count);
   // biomes[i] 对应方块 (x*4 + i % sx, z*4 + floor(i / sx))，值为 BiomeID
@@ -169,11 +176,11 @@ if (count > 0) {
 
 ### 参数（包围盒为**方块坐标**）
 
-| 参数      | 类型   | 含义                                                                  |
-| --------- | ------ | --------------------------------------------------------------------- |
+| 参数      | 类型   | 含义                                                                                |
+| --------- | ------ | ----------------------------------------------------------------------------------- |
 | struct_id | number | 结构类型 ID，取自 `enum StructureType`，见 [§7 结构对照表](#7-常量对照表mc_version) |
-| x1, z1    | number | 包围盒一个角（方块坐标）                                              |
-| x2, z2    | number | 对角（方块坐标）。`x1>x2` / `z1>z2` 会自动交换                        |
+| x1, z1    | number | 包围盒一个角（方块坐标）                                                            |
+| x2, z2    | number | 对角（方块坐标）。`x1>x2` / `z1>z2` 会自动交换                                      |
 
 > ⚠️ 坐标系与 `gen_biomes_tile` 不同：这里 `x1..z2` 是**方块坐标**，
 > 返回的也是方块坐标。两者不可混用。
@@ -190,7 +197,7 @@ if (count > 0) {
 ```js
 const n = mod._find_structures(4, -512, -512, 511, 511); // 4 = Igloo
 const ptr = mod._get_struct_buf();
-const buf = mod.HEAP32;              // 重新取视图
+const buf = mod.HEAP32; // 重新取视图
 const out = [];
 for (let i = 0; i < n; i++) {
   out.push({
@@ -276,7 +283,7 @@ int32**（8 字节），按 `x, z, x, z, ...` 平铺。
   (async () => {
     const mod = await CubiomesModule({ locateFile: (n) => `./wasm/${n}` });
     const s = BigInt.asUintN(64, 12345n);
-    mod._set_seed(33, Number(s >> 32n) | 0, Number(s & 0xffffffffn) | 0);
+    mod._set_seed(33, 0, Number(s >> 32n) | 0, Number(s & 0xffffffffn) | 0);
 
     const count = mod._gen_biomes_tile(-64, -64, 128, 128);
     const ptr = mod._get_biome_buf() >> 2;
@@ -301,7 +308,10 @@ async function fetchVerified(json, name) {
   const meta = json.files[name];
   const dest = path.join(DIR, name);
   if (fs.existsSync(dest)) {
-    const h = crypto.createHash("sha256").update(fs.readFileSync(dest)).digest("hex");
+    const h = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(dest))
+      .digest("hex");
     if (h === meta.sha256) return dest; // 本地缓存有效
   }
   const buf = Buffer.from(await (await fetch(meta.downloadUrl)).arrayBuffer());
@@ -325,7 +335,7 @@ async function fetchVerified(json, name) {
 
   // 1) 种子：MC 1.21.11 (id=33)，seed=-12345
   const s = BigInt.asUintN(64, -12345n);
-  mod._set_seed(33, Number(s >> 32n) | 0, Number(s & 0xffffffffn) | 0);
+  mod._set_seed(33, 0, Number(s >> 32n) | 0, Number(s & 0xffffffffn) | 0);
 
   // 2) 群系：原点为中心 128x128 瓦片（覆盖 512x512 方块）
   const n = mod._gen_biomes_tile(-128, -128, 128, 128);
@@ -344,10 +354,20 @@ async function fetchVerified(json, name) {
 ### 8.3 用 `cwrap` 让调用更清爽
 
 ```js
-const set_seed = mod.cwrap("set_seed", null, ["number", "number", "number"]);
-const gen = mod.cwrap("gen_biomes_tile", "number", ["number", "number", "number", "number"]);
+const set_seed = mod.cwrap("set_seed", null, [
+  "number",
+  "number",
+  "number",
+  "number",
+]);
+const gen = mod.cwrap("gen_biomes_tile", "number", [
+  "number",
+  "number",
+  "number",
+  "number",
+]);
 const buf = mod.cwrap("get_biome_buf", "number", []);
-set_seed(33, hi, lo);
+set_seed(33, 0, hi, lo); // (mc_version, dim, seed_hi, seed_lo)
 const count = gen(-64, -64, 128, 128);
 const ptr = buf();
 ```
@@ -363,8 +383,8 @@ const ptr = buf();
   不要把 `get_biome_buf`/`get_struct_buf` 的指针长期保存。
 - **视图失效**：`ALLOW_MEMORY_GROWTH` 下每次读堆都从 `mod` 重新取 `HEAP32`。
 - **存在性检查与降级**：导出函数以 `bridge/bridge.c` 与 `latest.json.exports`
-  为准，桥接层当前只增不删，但仍建议对 `mod._set_seed` 等做存在性检查，
-  失败时回退到内置旧产物。
+  为准，桥接层原则上只增不删（`set_seed` 曾因加入 `dim` 参数调整过签名，属破坏
+  性变更），仍建议对 `mod._set_seed` 等做存在性检查，失败时回退到内置旧产物。
 - **完整性校验**：始终以 `latest.json` 的 sha256/size 为准校验下载；同一 URL
   内容每天随上游滚动变化，需锁版本时记录 `latest.json` 的 `runId` 并保留副本。
 
@@ -372,10 +392,10 @@ const ptr = buf();
 
 ## 10. 接口一览（速查）
 
-| 函数              | 签名                                     | 坐标系     | 返回         | 输出布局                     |
-| ----------------- | ---------------------------------------- | ---------- | ------------ | ---------------------------- |
-| `set_seed`        | `(mc_version, seed_hi, seed_lo) => void` | —          | 无           | 建立 Generator + 应用种子    |
-| `gen_biomes_tile` | `(x, z, sx, sz) => count`                | 瓦片 1:4   | 群系 ID 个数 | int32 数组，行优先，`>>2`    |
-| `get_biome_buf`   | `() => ptr`                              | —          | 堆指针       | 上批群系结果                 |
-| `find_structures` | `(struct_id, x1, z1, x2, z2) => count`   | 方块       | 结构个数(≤4096) | `{x,z}` 数组，每结构 2 int32 |
-| `get_struct_buf`  | `() => ptr`                              | —          | 堆指针       | 上批结构结果                 |
+| 函数              | 签名                                          | 坐标系   | 返回            | 输出布局                        |
+| ----------------- | --------------------------------------------- | -------- | --------------- | ------------------------------- |
+| `set_seed`        | `(mc_version, dim, seed_hi, seed_lo) => void` | —        | 无              | 建立 Generator + 按维度应用种子 |
+| `gen_biomes_tile` | `(x, z, sx, sz) => count`                     | 瓦片 1:4 | 群系 ID 个数    | int32 数组，行优先，`>>2`       |
+| `get_biome_buf`   | `() => ptr`                                   | —        | 堆指针          | 上批群系结果                    |
+| `find_structures` | `(struct_id, x1, z1, x2, z2) => count`        | 方块     | 结构个数(≤4096) | `{x,z}` 数组，每结构 2 int32    |
+| `get_struct_buf`  | `() => ptr`                                   | —        | 堆指针          | 上批结构结果                    |

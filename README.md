@@ -58,13 +58,17 @@ const mod = await CubiomesModule({
 返回的大数组通过「C 侧静态缓冲区 + 指针读取」的方式取出：
 每次调用会**覆盖**上一批结果，请读取后立即拷贝。
 
-| 函数              | 签名                                     | 说明                                                                                   |
-| ----------------- | ---------------------------------------- | -------------------------------------------------------------------------------------- |
-| `set_seed`        | `(mc_version, seed_hi, seed_lo) => void` | 初始化生成器并设置种子。`mc_version` 见版本对照表；64 位种子拆成高低两个 32 位整数传入 |
-| `gen_biomes_tile` | `(x, z, sx, sz) => count`                | 生成矩形群系（scale 1:4、y=63 单层），返回群系 ID 数量                                 |
-| `get_biome_buf`   | `() => ptr`                              | 上一次 `gen_biomes_tile` 结果的堆内存指针（int32 数组）                                |
-| `find_structures` | `(struct_id, x1, z1, x2, z2) => count`   | 查找包围盒内的有效结构位置（已经过 `isViableStructurePos` 校验，无幽灵结构），返回数量 |
-| `get_struct_buf`  | `() => ptr`                              | 上一次 `find_structures` 结果的指针（`{x,z}` 即每结构 2 个 int32）                     |
+| 函数              | 签名                                          | 说明                                                                                                                                     |
+| ----------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_seed`        | `(mc_version, dim, seed_hi, seed_lo) => void` | 初始化生成器并按维度设置种子。`mc_version` 见版本对照表；`dim` 取 `-1`/`0`/`+1`（下界/主世界/末地）；64 位种子拆成高低两个 32 位整数传入 |
+| `gen_biomes_tile` | `(x, z, sx, sz) => count`                     | 生成矩形群系（scale 1:4、y=63 单层），返回群系 ID 数量                                                                                   |
+| `get_biome_buf`   | `() => ptr`                                   | 上一次 `gen_biomes_tile` 结果的堆内存指针（int32 数组）                                                                                  |
+| `find_structures` | `(struct_id, x1, z1, x2, z2) => count`        | 查找包围盒内的有效结构位置（已经过 `isViableStructurePos` 校验，无幽灵结构），返回数量                                                   |
+| `get_struct_buf`  | `() => ptr`                                   | 上一次 `find_structures` 结果的指针（`{x,z}` 即每结构 2 个 int32）                                                                       |
+
+> 另有枚举查询导出（`get_supported_versions`/`_dimensions`/`_structures`/`_biomes`
+> 及对应 `*_to_str`、`*_buf`），用于按版本动态取「可用版本 / 维度 / 结构 / 群系」
+> 清单并把 ID 转成名字，详见 [`README_DATA.md`](README_DATA.md)。
 
 #### 3.1 设置种子
 
@@ -72,16 +76,21 @@ Minecraft 种子常为有符号 64 位整数。拆分成两半时**必须保留�
 用 BigInt 按无符号 64 位截断，而不是 JS 的浮点 `Math.floor`：
 
 ```js
-function setSeed(mod, mcVersion, seed /* number | bigint */) {
+function setSeed(mod, mcVersion, seed /* number | bigint */, dim = 0) {
   const s = BigInt.asUintN(64, BigInt(seed)); // 支持负数种子，如 -12345
-  mod._set_seed(mcVersion, Number(s >> 32n) | 0, Number(s & 0xffffffffn) | 0);
+  mod._set_seed(
+    mcVersion,
+    dim,
+    Number(s >> 32n) | 0,
+    Number(s & 0xffffffffn) | 0,
+  );
 }
-setSeed(mod, 33, 12345); // 33 = MC_1_21_11（即 1.21 别名），见下方版本对照表
+setSeed(mod, 33, 12345); // 33 = MC_1_21_11（即 1.21 别名），dim=0 主世界，见下方版本对照表
 ```
 
-切换 `mc_version` 时桥接层会自动重建 Generator。当前桥接层固定使用
-主世界（`DIM_OVERWORLD`），下界/末地未对外暴露，集成端若需要
-其他维度请在 `bridge/bridge.c` 新增入口并提 PR。
+切换 `mc_version` 时桥接层会自动重建 Generator。维度由 `set_seed` 的 `dim`
+入参选择（`-1` 下界 / `0` 主世界 / `1` 末地，非法值回退主世界）；切换维度
+只重新 `applySeed`，不重建 Generator。可用 `get_supported_dimensions` 枚举。
 
 #### 3.2 批量获取群系 ID
 
@@ -204,7 +213,7 @@ async function fetchVerified(json, name) {
 
   // 1) 种子: MC 1.21.11 (id=33), seed=-12345
   const s = BigInt.asUintN(64, -12345n);
-  mod._set_seed(33, Number(s >> 32n) | 0, Number(s & 0xffffffffn) | 0);
+  mod._set_seed(33, 0, Number(s >> 32n) | 0, Number(s & 0xffffffffn) | 0);
 
   // 2) 群系: 以原点为中心 64x64 (1:4 比例，覆盖 256x256 方块)
   const n = mod._gen_biomes_tile(-128, -128, 64, 64);
@@ -231,6 +240,7 @@ async function fetchVerified(json, name) {
 - **完整性**：始终以 `latest.json` 的 sha256 为准校验下载；自行分发时
   连同元数据一起打包，便于追溯对应的上游 commit。
 - **接口稳定性**：导出函数以 `bridge/bridge.c` 与 `latest.json.exports`
-  为准；桥接层刻意保持窄接口（版本切换、种子拆分、缓冲区读取都封装在
-  C 侧），上游 API 变动由本仓库 CI 消化，一般只增不减，但仍建议对
-  `mod._set_seed` 等做存在性检查并做失败降级（回退到内置旧产物）。
+  为准；桥接层刻意保持窄接口（版本切换、维度/种子拆分、缓冲区读取都封装在
+  C 侧），上游 API 变动由本仓库 CI 消化，一般只增不减（`set_seed` 曾因加入
+  `dim` 参数调整过签名，属破坏性变更），仍建议对 `mod._set_seed` 等做存在性
+  检查并做失败降级（回退到内置旧产物）。
