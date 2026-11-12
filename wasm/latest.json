@@ -3,14 +3,27 @@
   "commit": "8c37ab26f2b47740839eb0045b34efc5141eb065",
   "commitUrl": "https://github.com/xpple/cubiomes/commit/8c37ab26f2b47740839eb0045b34efc5141eb065",
   "emscripten": "3.1.51",
-  "builtAt": "2026-11-11T06:38:26Z",
-  "runId": "42973742553",
+  "builtAt": "2026-11-12T03:12:53Z",
+  "runId": "43146565307",
   "exports": [
     "set_seed",
     "gen_biomes_tile",
     "get_biome_buf",
     "find_structures",
-    "get_struct_buf"
+    "get_struct_buf",
+    "mc_version_to_str",
+    "mc_str_to_version",
+    "get_supported_versions",
+    "get_supported_versions_buf",
+    "dim_to_str",
+    "get_supported_dimensions",
+    "get_supported_dimensions_buf",
+    "struct_to_str",
+    "get_supported_structures",
+    "get_supported_structures_buf",
+    "biome_to_str",
+    "get_supported_biomes",
+    "get_supported_biomes_buf"
   ],
   "release": {
     "tag": "wasm-latest",
@@ -19,13 +32,13 @@
   "files": {
     "cubiomes.js": {
       "downloadUrl": "https://github.com/YGYL2333/MSS-launcher-CI/releases/download/wasm-latest/cubiomes.js",
-      "sha256": "cccea2408c7e4068009ad1c42ac0bc031c1279940cce3e8529cc8539395ca287",
-      "size": 15528
+      "sha256": "09b644a576139eca0e9b94858187d574dcabd2d7d0d5eae913dc57a45f2ff85b",
+      "size": 17357
     },
     "cubiomes.wasm": {
       "downloadUrl": "https://github.com/YGYL2333/MSS-launcher-CI/releases/download/wasm-latest/cubiomes.wasm",
-      "sha256": "036c2887c19ac621a392c3b5b4f02ddc5aede943ab5cb63e28215db988f5e920",
-      "size": 693694
+      "sha256": "b502e8b0b4083a3fd49ad99256305888795b28bcbf5d088050e989a22256357d",
+      "size": 698737
     }
   }
 }
