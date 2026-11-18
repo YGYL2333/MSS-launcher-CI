@@ -23,9 +23,19 @@ jobs:
 
       - name: 获取上游最新版本标识
         id: get-version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 直接追踪活跃分支的 master 提交
-          VERSION=$(curl -sL "https://api.github.com/repos/xpple/cubiomes/commits/master" | jq -r '.sha')
+          # 直接追踪活跃分支的 master 提交。
+          # 必须带 token 认证：匿名 API 限额 60 次/小时/IP，runner 共享出口 IP
+          # 极易触发限流，错误 JSON 会被 jq 解析成 "null" 并污染下游步骤。
+          VERSION=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/xpple/cubiomes/commits/master" | jq -r '.sha')
+          # 校验为 40 位十六进制 commit SHA，非法立即失败，不把 "null" 传下去
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "获取上游 commit 失败，得到非法版本标识: '$VERSION'"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "xpple/cubiomes 最新 commit: $VERSION"
 
@@ -51,7 +61,10 @@ jobs:
       - name: 下载指定版本的源码
         run: |
           VERSION="${{ needs.check-upstream.outputs.upstream_version }}"
-          curl -sL "https://api.github.com/repos/xpple/cubiomes/tarball/$VERSION" -o cubiomes.tar.gz
+          # 直接走 codeload（不占 REST API 配额）；-f 让 404/限流等 HTTP 错误直接失败，
+          # 避免把错误响应 JSON 存成 cubiomes.tar.gz 后解压报 "not in gzip format"
+          curl -fsSL "https://codeload.github.com/xpple/cubiomes/tar.gz/$VERSION" -o cubiomes.tar.gz
+          gzip -t cubiomes.tar.gz
           mkdir -p cubiomes-src
           tar -xzf cubiomes.tar.gz -C cubiomes-src --strip-components=1
 
