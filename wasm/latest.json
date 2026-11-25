@@ -1,10 +1,10 @@
 {
   "upstream": "xpple/cubiomes",
-  "commit": "b182cc7defedabfad2e05334edc1af22d6020c99",
-  "commitUrl": "https://github.com/xpple/cubiomes/commit/b182cc7defedabfad2e05334edc1af22d6020c99",
+  "commit": "06393cf40f0d4aa30a6db28302ab053037ca785b",
+  "commitUrl": "https://github.com/xpple/cubiomes/commit/06393cf40f0d4aa30a6db28302ab053037ca785b",
   "emscripten": "3.1.51",
-  "builtAt": "2026-11-24T08:07:38Z",
-  "runId": "45353251807",
+  "builtAt": "2026-11-25T06:46:07Z",
+  "runId": "45562926308",
   "exports": [
     "set_seed",
     "gen_biomes_tile",
