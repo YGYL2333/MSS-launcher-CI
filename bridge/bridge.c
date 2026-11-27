@@ -10,6 +10,7 @@
 #include "biomes.h"
 #include "finders.h"
 #include "util.h"   /* mc2str / str2mc：版本枚举值与显示字符串互转 */
+#include "features/end_city.h"  /* END_SHIP / getEndCityPieces / END_CITY_PIECES_MAX */
 #include <emscripten.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -23,8 +24,12 @@ static int g_version = 0;
 static int *biome_buf = NULL;
 static int biome_buf_len = 0;
 
-/* ---------------- 结构缓冲区 ---------------- */
-typedef struct { int x; int z; } StructPos;
+/* ---------------- 结构缓冲区 ----------------
+ * 每个结果附带一个 variant 字段：它始终等于“该实例最具体的结构 ID”——若该大类
+ * 存在细分变体（如沙漠村庄、桥梁堡垒），variant 为对应的扩展 ID；否则 variant 等于
+ * 大类 ID 本身。JS 侧用 struct_to_str(variant) 直接取到与精灵图 key 一致的名字。
+ * 缓冲区按每元素 3 个 int 连续存放：(x, z, variant)。 */
+typedef struct { int x; int z; int variant; } StructPos;
 static StructPos *struct_buf = NULL;
 static int struct_buf_len = 0;
 
@@ -97,18 +102,299 @@ int gen_biomes_tile(int x, int z, int sx, int sz)
 EMSCRIPTEN_KEEPALIVE
 int *get_biome_buf(void) { return biome_buf; }
 
+/* ---------------- 变体与探测扩展 ID ----------------
+ * cubiomes 的 enum StructureType 只到大类。下面在同一 ID 空间里，自 FEATURE_NUM
+ * 起为“结构变体”与“非区域型探测项”分配扩展 ID：get_supported_structures 一次性
+ * 列出大类、变体与探测项；find_structures 既能接受大类 ID（返回该大类全部实例并在
+ * 每个结果上标注其具体变体），也能接受变体/探测 ID（只返回匹配项）；struct_to_str
+ * 把每个 ID（大类或扩展）翻成与前端精灵图 key 一致的名字。 */
+enum {
+    XT_VILLAGE_DESERT = FEATURE_NUM,
+    XT_VILLAGE_SAVANNA,
+    XT_VILLAGE_SNOWY,
+    XT_VILLAGE_TAIGA,
+    XT_VILLAGE_ZOMBIE,
+    XT_BASTION_BRIDGE,
+    XT_BASTION_STABLES,
+    XT_BASTION_TREASURE,
+    XT_BASTION_UNITS,
+    XT_IGLOO_BASEMENT,
+    XT_RUINED_PORTAL_GIANT,
+    XT_OCEAN_RUIN_SPECIAL,
+    XT_END_CITY_SHIP,
+    XT_ABANDONED_CAMP_SECRET_CHEST,
+    XT_NETHER_FOSSIL_GHAST,
+    XT_SLIME,
+    XT_SPAWN,
+    XT_RAW_COPPER,
+    XT_RAW_IRON,
+    XT_NUM
+};
+
+/* 有细分精灵图的变体扩展 ID -> 其所属大类（用于区域定位）。 */
+typedef struct { int ext; int base; } ExtVariant;
+static const ExtVariant ext_variants[] = {
+    { XT_VILLAGE_DESERT, Village },
+    { XT_VILLAGE_SAVANNA, Village },
+    { XT_VILLAGE_SNOWY, Village },
+    { XT_VILLAGE_TAIGA, Village },
+    { XT_VILLAGE_ZOMBIE, Village },
+    { XT_BASTION_BRIDGE, Bastion },
+    { XT_BASTION_STABLES, Bastion },
+    { XT_BASTION_TREASURE, Bastion },
+    { XT_BASTION_UNITS, Bastion },
+    { XT_IGLOO_BASEMENT, Igloo },
+    { XT_RUINED_PORTAL_GIANT, Ruined_Portal },
+    { XT_OCEAN_RUIN_SPECIAL, Ocean_Ruin },
+    { XT_END_CITY_SHIP, End_City },
+    { XT_ABANDONED_CAMP_SECRET_CHEST, Abandoned_Camp },
+    { XT_NETHER_FOSSIL_GHAST, Nether_Fossil },
+};
+
+/* 每个扩展/探测 ID 的精灵图名（与前端 atlas key 对齐）。 */
+static const struct { int id; const char *name; } ext_names[] = {
+    { XT_VILLAGE_DESERT, "village_desert" },
+    { XT_VILLAGE_SAVANNA, "village_savanna" },
+    { XT_VILLAGE_SNOWY, "village_snowy" },
+    { XT_VILLAGE_TAIGA, "village_taiga" },
+    { XT_VILLAGE_ZOMBIE, "village_zombie" },
+    { XT_BASTION_BRIDGE, "bastion_remnant_bridge" },
+    { XT_BASTION_STABLES, "bastion_remnant_stables" },
+    { XT_BASTION_TREASURE, "bastion_remnant_treasure" },
+    { XT_BASTION_UNITS, "bastion_remnant_units" },
+    { XT_IGLOO_BASEMENT, "igloo_basement" },
+    { XT_RUINED_PORTAL_GIANT, "ruined_portal_giant" },
+    { XT_OCEAN_RUIN_SPECIAL, "ocean_ruin_special" },
+    { XT_END_CITY_SHIP, "end_city_ship" },
+    { XT_ABANDONED_CAMP_SECRET_CHEST, "abandoned_camp_secret_chest" },
+    { XT_NETHER_FOSSIL_GHAST, "nether_fossil_ghast" },
+    { XT_SLIME, "slime" },
+    { XT_SPAWN, "spawn" },
+    { XT_RAW_COPPER, "raw_copper" },
+    { XT_RAW_IRON, "raw_iron" },
+};
+
+static const char *ext_name_of(int id)
+{
+    size_t i;
+    for (i = 0; i < sizeof(ext_names) / sizeof(ext_names[0]); i++)
+        if (ext_names[i].id == id) return ext_names[i].name;
+    return NULL;
+}
+
+/* 变体扩展 ID -> 大类 ID；非变体（大类 ID 与探测项）返回 -1。 */
+static int ext_base_of(int id)
+{
+    size_t i;
+    for (i = 0; i < sizeof(ext_variants) / sizeof(ext_variants[0]); i++)
+        if (ext_variants[i].ext == id) return ext_variants[i].base;
+    return -1;
+}
+
+/* 确保结构缓冲区至少容纳 need 个元素；成功返回 0，失败返回 -1。 */
+static int ensure_struct_capacity(int need)
+{
+    if (struct_buf_len >= need && struct_buf) return 0;
+    free(struct_buf);
+    struct_buf = (StructPos *)malloc((size_t)need * sizeof(StructPos));
+    if (!struct_buf) { struct_buf_len = 0; return -1; }
+    struct_buf_len = need;
+    return 0;
+}
+
+/* 判定某个已定位结构实例的具体变体 ID；无细分时返回大类 ID 本身。
+ * 依赖已 applySeed 的全局 g（版本/种子/维度）。 */
+static int classify_variant(int base_id, int bx, int bz)
+{
+    StructureVariant sv;
+    switch (base_id) {
+    case Village: {
+        /* isViableStructurePos 的 flags 传入具体群系即可判定村庄类型 */
+        const int vv[] = { plains, desert, savanna, taiga, snowy_tundra };
+        int type = -1, i;
+        for (i = 0; i < (int)(sizeof(vv) / sizeof(vv[0])); i++)
+            if (isViableStructurePos(Village, &g, bx, bz, (uint32_t)vv[i])) { type = vv[i]; break; }
+        if (type < 0) return Village;
+        if (getVariant(&sv, Village, g_version, g.seed, bx, bz, type) && sv.abandoned)
+            return XT_VILLAGE_ZOMBIE;
+        switch (type) {
+        case desert:       return XT_VILLAGE_DESERT;
+        case savanna:      return XT_VILLAGE_SAVANNA;
+        case taiga:        return XT_VILLAGE_TAIGA;
+        case snowy_tundra: return XT_VILLAGE_SNOWY;
+        default:           return Village;   /* plains 等：用大类精灵图 */
+        }
+    }
+    case Bastion:
+        if (getVariant(&sv, Bastion, g_version, g.seed, bx, bz, -1))
+            switch (sv.start) {
+            case 0: return XT_BASTION_UNITS;
+            case 1: return XT_BASTION_STABLES;
+            case 2: return XT_BASTION_TREASURE;
+            case 3: return XT_BASTION_BRIDGE;
+            }
+        return Bastion;
+    case Igloo:
+        if (getVariant(&sv, Igloo, g_version, g.seed, bx, bz, -1) && sv.basement)
+            return XT_IGLOO_BASEMENT;
+        return Igloo;
+    case Ruined_Portal: {
+        int id = getBiomeAt(&g, 4, bx >> 2, 0, bz >> 2);
+        if (getVariant(&sv, Ruined_Portal, g_version, g.seed, bx, bz, id) && sv.giant)
+            return XT_RUINED_PORTAL_GIANT;
+        return Ruined_Portal;
+    }
+    case Ocean_Ruin:
+        if (getBiomeAt(&g, 4, bx >> 2, 0, bz >> 2) == warm_ocean)
+            return XT_OCEAN_RUIN_SPECIAL;
+        return Ocean_Ruin;
+    case End_City: {
+        static Piece ec_pieces[END_CITY_PIECES_MAX];
+        int n = getEndCityPieces(ec_pieces, g.seed, bx >> 4, bz >> 4), i;
+        for (i = 0; i < n; i++)
+            if (ec_pieces[i].type == END_SHIP) return XT_END_CITY_SHIP;
+        return End_City;
+    }
+    case Abandoned_Camp: {
+        StructureSaltConfig sc;
+        Piece pieces[2];
+        int id = getBiomeAt(&g, 4, bx >> 2, 320 >> 2, bz >> 2);
+        if (getStructureSaltConfig(Abandoned_Camp, g_version, id, &sc) &&
+            getVariant(&sv, Abandoned_Camp, g_version, g.seed, bx, bz, id)) {
+            int np = getStructurePieces(pieces, 2, Abandoned_Camp, sc, &sv, g_version, g.seed, bx, bz);
+            int i, j;
+            for (i = 0; i < np; i++)
+                for (j = 0; j < pieces[i].chestCount && j < 4; j++)
+                    if (pieces[i].lootTables[j] &&
+                        strcmp(pieces[i].lootTables[j], "chests/abandoned_camp_secret_chest") == 0)
+                        return XT_ABANDONED_CAMP_SECRET_CHEST;
+        }
+        return Abandoned_Camp;
+    }
+    case Nether_Fossil:
+        if (getVariant(&sv, Nether_Fossil, g_version, g.seed, bx, bz, -1) &&
+            netherFossilHasGhast(bx >> 4, bz >> 4, g.seed, &sv))
+            return XT_NETHER_FOSSIL_GHAST;
+        return Nether_Fossil;
+    default:
+        return base_id;
+    }
+}
+
+/* 要塞：非 region 型，用螺旋迭代器定位（主世界，B1.8+）。 */
+static int find_stronghold(int x1, int z1, int x2, int z2)
+{
+    StrongholdIter sh;
+    Pos p;
+    int i, count = 0, total;
+    if (g.dim != DIM_OVERWORLD || g_version < MC_B1_8) return 0;
+    if (ensure_struct_capacity(128) != 0) return 0;
+    initFirstStronghold(&sh, g_version, g.seed & MASK48);
+    total = (g_version >= MC_1_9) ? 128 : 3;
+    for (i = 0; i < total; i++) {
+        int rem = nextStronghold(&sh, &g);   /* 定位当前要塞并推进 */
+        p = sh.pos;
+        if (p.x >= x1 && p.x <= x2 && p.z >= z1 && p.z <= z2) {
+            struct_buf[count].x = p.x;
+            struct_buf[count].z = p.z;
+            struct_buf[count].variant = Stronghold;
+            count++;
+        }
+        if (rem <= 0) break;
+    }
+    return count;
+}
+
+/* 出生点：单点，仅当落在包围盒内时返回。 */
+static int find_spawn(int x1, int z1, int x2, int z2)
+{
+    Pos sp;
+    if (g.dim != DIM_OVERWORLD) return 0;
+    if (ensure_struct_capacity(1) != 0) return 0;
+    sp = getSpawn(&g);
+    if (sp.x >= x1 && sp.x <= x2 && sp.z >= z1 && sp.z <= z2) {
+        struct_buf[0].x = sp.x;
+        struct_buf[0].z = sp.z;
+        struct_buf[0].variant = XT_SPAWN;
+        return 1;
+    }
+    return 0;
+}
+
+/* 史莱姆区块：逐 chunk 判定，命中即标注该区块中心（主世界）。 */
+static int find_slime(int x1, int z1, int x2, int z2)
+{
+    int cx1, cx2, cz1, cz2, cx, cz, count = 0, capacity;
+    long long total;
+    if (g.dim != DIM_OVERWORLD) return 0;
+    cx1 = floordiv(x1, 16); cx2 = floordiv(x2, 16);
+    cz1 = floordiv(z1, 16); cz2 = floordiv(z2, 16);
+    total = (long long)(cx2 - cx1 + 1) * (cz2 - cz1 + 1);
+    if (total < 1) total = 1;
+    capacity = (total > 4096) ? 4096 : (int)total;
+    if (ensure_struct_capacity(capacity) != 0) return 0;
+    for (cz = cz1; cz <= cz2 && count < capacity; cz++)
+        for (cx = cx1; cx <= cx2 && count < capacity; cx++) {
+            int bx, bz;
+            if (!isSlimeChunk(g.seed, cx, cz)) continue;
+            bx = cx * 16 + 8; bz = cz * 16 + 8;
+            if (bx < x1 || bx > x2 || bz < z1 || bz > z2) continue;
+            struct_buf[count].x = bx;
+            struct_buf[count].z = bz;
+            struct_buf[count].variant = XT_SLIME;
+            count++;
+        }
+    return count;
+}
+
+/* 粗铜块/粗铁块：大矿脉噪声仅 1.18+ 有。按区块中心粗采样（区块内 4x4 网格），
+ * 命中目标方块即标注该区块——属近似，缩略图级别用于指示矿脉分布已足够。 */
+static int find_ore_vein(int ext_id, int x1, int z1, int x2, int z2)
+{
+    OreVeinParameters params;
+    int target, sampleY, cx1, cx2, cz1, cz2, cx, cz, ix, iz, count = 0, capacity;
+    long long total;
+    if (g.dim != DIM_OVERWORLD || g_version < MC_1_18) return 0;
+    if (!initOreVeinNoise(&params, g.seed, g_version)) return 0;
+    if (ext_id == XT_RAW_COPPER) { target = RAW_COPPER_BLOCK; sampleY = 16; }
+    else                         { target = RAW_IRON_BLOCK;   sampleY = -24; }
+    cx1 = floordiv(x1, 16); cx2 = floordiv(x2, 16);
+    cz1 = floordiv(z1, 16); cz2 = floordiv(z2, 16);
+    total = (long long)(cx2 - cx1 + 1) * (cz2 - cz1 + 1);
+    if (total < 1) total = 1;
+    capacity = (total > 4096) ? 4096 : (int)total;
+    if (ensure_struct_capacity(capacity) != 0) return 0;
+    for (cz = cz1; cz <= cz2 && count < capacity; cz++) {
+        for (cx = cx1; cx <= cx2 && count < capacity; cx++) {
+            int found = 0, bx, bz;
+            for (iz = 0; iz < 4 && !found; iz++)
+                for (ix = 0; ix < 4 && !found; ix++)
+                    if (getOreVeinBlockAt(cx * 16 + ix * 4 + 2, sampleY, cz * 16 + iz * 4 + 2, &params) == target)
+                        found = 1;
+            if (!found) continue;
+            bx = cx * 16 + 8; bz = cz * 16 + 8;
+            struct_buf[count].x = bx;
+            struct_buf[count].z = bz;
+            struct_buf[count].variant = ext_id;
+            count++;
+        }
+    }
+    return count;
+}
+
 /*
- * 查找矩形范围内某类结构的有效坐标，结果写入结构缓冲区，返回数量。
- * 新版 cubiomes 取消了批量的 getStructurePositions/Bounding/Position，
- * 改为先取结构的 region 尺寸，再逐个 region 调用 getStructurePos 得到
- * “生成尝试位置”，并用 isViableStructurePos 校验群系/地形，否则会出现
- * 地图上可见但游戏内不生成的“幽灵结构”。
+ * 查找矩形范围内某类结构（含变体/探测项）的有效坐标，结果写入结构缓冲区，返回数量。
+ * 缓冲区每元素为 (x, z, variant)，variant 由 classify_variant 得出，是对该实例最具体
+ * 的结构 ID（大类或其某个变体）。传入大类 ID 返回该大类全部实例（各自带变体标注）；
+ * 传入某个变体 ID 只返回匹配该变体的实例；要塞与史莱姆/出生点/粗铜/粗铁走专用通道。
+ * region 型结构沿用 getStructurePos + isViableStructurePos 校验，剔除“幽灵结构”。
  */
 EMSCRIPTEN_KEEPALIVE
 int find_structures(int struct_id, int x1, int z1, int x2, int z2)
 {
     StructureConfig sconf;
     Pos pos;
+    int base_id, variant;
     int count = 0;
     int regionBlocks;
     int regX1, regX2, regZ1, regZ2, rx, rz;
@@ -119,8 +405,19 @@ int find_structures(int struct_id, int x1, int z1, int x2, int z2)
     if (x1 > x2) { int t = x1; x1 = x2; x2 = t; }
     if (z1 > z2) { int t = z1; z1 = z2; z2 = t; }
 
+    /* 非区域型探测项 */
+    if (struct_id == XT_SPAWN) return find_spawn(x1, z1, x2, z2);
+    if (struct_id == XT_SLIME) return find_slime(x1, z1, x2, z2);
+    if (struct_id == XT_RAW_COPPER || struct_id == XT_RAW_IRON)
+        return find_ore_vein(struct_id, x1, z1, x2, z2);
+
+    /* 大类或某个变体：解析出用于区域定位的大类 ID */
+    base_id = (struct_id >= FEATURE_NUM) ? ext_base_of(struct_id) : struct_id;
+    if (base_id < 0) return 0;
+    if (base_id == Stronghold) return find_stronghold(x1, z1, x2, z2);
+
     /* 取得该结构在此版本下的 region 尺寸（以 chunk 为单位） */
-    if (!getStructureConfig(struct_id, g_version, &sconf)) return 0;
+    if (!getStructureConfig(base_id, g_version, &sconf)) return 0;
     regionBlocks = (int)sconf.regionSize << 4;   /* regionSize * 16 方块 */
     if (regionBlocks <= 0) regionBlocks = 1;
 
@@ -134,28 +431,26 @@ int find_structures(int struct_id, int x1, int z1, int x2, int z2)
     totalRegions = (long long)(regX2 - regX1 + 1) * (regZ2 - regZ1 + 1);
     if (totalRegions < 1) totalRegions = 1;
     capacity = (totalRegions > 4096) ? 4096 : (int)totalRegions;
-
-    if (struct_buf_len < capacity) {
-        free(struct_buf);
-        struct_buf = (StructPos *)malloc((size_t)capacity * sizeof(StructPos));
-        if (!struct_buf) { struct_buf_len = 0; return 0; }
-        struct_buf_len = capacity;
-    }
-    if (!struct_buf) return 0;
+    if (ensure_struct_capacity(capacity) != 0) return 0;
 
     for (rz = regZ1; rz <= regZ2 && count < capacity; rz++) {
         for (rx = regX1; rx <= regX2 && count < capacity; rx++) {
             /* 每个 region 至多给出一个生成尝试位置 */
-            if (!getStructurePos(struct_id, g_version, g.seed, rx, rz, &pos))
+            if (!getStructurePos(base_id, g_version, g.seed, rx, rz, &pos))
                 continue;
             /* 过滤落在包围盒之外的候选 */
             if (pos.x < x1 || pos.x > x2 || pos.z < z1 || pos.z > z2)
                 continue;
             /* 校验群系/地形，剔除“幽灵结构” */
-            if (!isViableStructurePos(struct_id, &g, pos.x, pos.z, 0))
+            if (!isViableStructurePos(base_id, &g, pos.x, pos.z, 0))
+                continue;
+            /* 判定该实例的具体变体；查询指定变体时过滤不匹配项 */
+            variant = classify_variant(base_id, pos.x, pos.z);
+            if (struct_id != base_id && variant != struct_id)
                 continue;
             struct_buf[count].x = pos.x;
             struct_buf[count].z = pos.z;
+            struct_buf[count].variant = variant;
             count++;
         }
     }
@@ -267,7 +562,11 @@ static int struct_id_buf_len = 0;
 
 /* 结构 ID -> 资源名（无对应名字返回 NULL）。返回内部静态字符串，调用方勿释放。 */
 EMSCRIPTEN_KEEPALIVE
-const char *struct_to_str(int stype) { return struct2str(stype); }
+const char *struct_to_str(int stype)
+{
+    const char *ext = ext_name_of(stype);   /* 变体/探测扩展 ID 优先 */
+    return ext ? ext : struct2str(stype);
+}
 
 /*
  * 遍历 enum StructureType，把 mc 版本下 find_structures 可用的结构 ID 写入缓冲区，
@@ -278,19 +577,40 @@ int get_supported_structures(int mc)
 {
     StructureConfig sconf;
     int stype, count = 0;
+    size_t i;
+    int total = FEATURE_NUM + XT_NUM;   /* 足以容纳大类 + 全部变体/探测项 */
 
-    if (FEATURE_NUM <= 0) return 0;
-    if (struct_id_buf_len < FEATURE_NUM) {
+    if (struct_id_buf_len < total) {
         free(struct_id_buf);
-        struct_id_buf = (int *)malloc((size_t)FEATURE_NUM * sizeof(int));
+        struct_id_buf = (int *)malloc((size_t)total * sizeof(int));
         if (!struct_id_buf) { struct_id_buf_len = 0; return 0; }
-        struct_id_buf_len = FEATURE_NUM;
+        struct_id_buf_len = total;
     }
 
+    /* 1) 可区域定位的大类结构 */
     for (stype = 0; stype < FEATURE_NUM; stype++) {
         if (!struct2str(stype)) continue;                     /* 无资源名，跳过 */
         if (!getStructureConfig(stype, mc, &sconf)) continue; /* 该版本不支持 */
         struct_id_buf[count++] = stype;
+    }
+
+    /* 2) 要塞（非 region 型，find_structures 内走螺旋定位特判） */
+    if (mc >= MC_B1_8)
+        struct_id_buf[count++] = Stronghold;
+
+    /* 3) 结构变体：其大类在本版本可用时一并列出 */
+    for (i = 0; i < sizeof(ext_variants) / sizeof(ext_variants[0]); i++) {
+        if (!struct2str(ext_variants[i].base)) continue;
+        if (!getStructureConfig(ext_variants[i].base, mc, &sconf)) continue;
+        struct_id_buf[count++] = ext_variants[i].ext;
+    }
+
+    /* 4) 非区域探测项（史莱姆区块 / 出生点，粗铜块 / 粗铁块仅 1.18+） */
+    struct_id_buf[count++] = XT_SLIME;
+    struct_id_buf[count++] = XT_SPAWN;
+    if (mc >= MC_1_18) {
+        struct_id_buf[count++] = XT_RAW_COPPER;
+        struct_id_buf[count++] = XT_RAW_IRON;
     }
     return count;
 }

@@ -23,7 +23,7 @@
 set_seed(...)            → 建立/复用 Generator 并写入种子（每次查询前必做）
 gen_biomes_tile(...)     → 把一批群系 ID 写进 C 侧静态缓冲区，返回元素个数
 get_biome_buf()          → 取上一批结果的堆指针，立即从 HEAP32 拷出
-find_structures(...)     → 把一批结构 {x,z} 写进另一静态缓冲区，返回个数
+find_structures(...)     → 把一批结构 {x,z,variant} 写进另一静态缓冲区，返回个数
 get_struct_buf()         → 取上一批结果的堆指针，立即从 HEAP32 拷出
 ```
 
@@ -170,17 +170,24 @@ if (count > 0) {
 
 ## 5. `find_structures(struct_id, x1, z1, x2, z2) => count`
 
-查找包围盒内某类结构的**有效坐标**。桥接层逐 region 取生成尝试位置
-（`getStructurePos`），再用 `isViableStructurePos` 校验群系/地形，**剔除
-地图上可见但游戏内不生成的「幽灵结构」**，因此返回坐标保证游戏内实际生成。
+查找包围盒内某类结构的**有效坐标**，并附带每个实例的**具体变体标注**。
+
+- 传入**大类 ID**：返回该大类全部实例，`variant` 标注各自最具体的变体。
+- 传入**变体/探测 ID**（见 [§7](#7-常量对照表mc_version)）：只返回匹配该变体的实例。
+
+region 型结构逐 region 取生成尝试位置（`getStructurePos`），再用
+`isViableStructurePos` 校验群系/地形，**剔除地图上可见但游戏内不生成的
+「幽灵结构」**，因此返回坐标保证游戏内实际生成。变体判定用 `getVariant` /
+结构件模拟（`getEndCityPieces`、`getStructurePieces`）等；要塞走螺旋迭代器，
+史莱姆/出生点/粗铜/粗铁走各自专用探测。
 
 ### 参数（包围盒为**方块坐标**）
 
-| 参数      | 类型   | 含义                                                                                |
-| --------- | ------ | ----------------------------------------------------------------------------------- |
-| struct_id | number | 结构类型 ID，取自 `enum StructureType`，见 [§7 结构对照表](#7-常量对照表mc_version) |
-| x1, z1    | number | 包围盒一个角（方块坐标）                                                            |
-| x2, z2    | number | 对角（方块坐标）。`x1>x2` / `z1>z2` 会自动交换                                      |
+| 参数      | 类型   | 含义                                                                                                    |
+| --------- | ------ | ------------------------------------------------------------------------------------------------------- |
+| struct_id | number | 结构 ID：大类 ID（`enum StructureType`）或变体/探测扩展 ID，见 [§7 结构对照表](#7-常量对照表mc_version) |
+| x1, z1    | number | 包围盒一个角（方块坐标）                                                                                |
+| x2, z2    | number | 对角（方块坐标）。`x1>x2` / `z1>z2` 会自动交换                                                          |
 
 > ⚠️ 坐标系与 `gen_biomes_tile` 不同：这里 `x1..z2` 是**方块坐标**，
 > 返回的也是方块坐标。两者不可混用。
@@ -195,20 +202,24 @@ if (count > 0) {
 ### 读取结果
 
 ```js
-const n = mod._find_structures(4, -512, -512, 511, 511); // 4 = Igloo
+const n = mod._find_structures(4, -512, -512, 511, 511); // 4 = Igloo（大类，附带变体）
 const ptr = mod._get_struct_buf();
 const buf = mod.HEAP32; // 重新取视图
 const out = [];
 for (let i = 0; i < n; i++) {
+  const variant = buf[(ptr >> 2) + i * 3 + 2];
   out.push({
-    x: buf[(ptr >> 2) + i * 2],
-    z: buf[(ptr >> 2) + i * 2 + 1],
+    x: buf[(ptr >> 2) + i * 3],
+    z: buf[(ptr >> 2) + i * 3 + 1],
+    name: mod.ccall("struct_to_str", "string", ["number"], [variant]), // 精灵图 key
   });
 }
 ```
 
-数据布局：结构缓冲区是 `{int32 x; int32 z;}` 数组，每个结构占 **2 个
-int32**（8 字节），按 `x, z, x, z, ...` 平铺。
+数据布局：结构缓冲区是 `{int32 x; int32 z; int32 variant;}` 数组，每个结构占
+**3 个 int32**（12 字节），按 `x, z, variant, ...` 平铺。`variant` 是对该实例最
+具体的结构 ID（大类或其某个变体），经 `struct_to_str(variant)` 直接得到与前端
+精灵图 key 一致的名字（如 `igloo_basement`、`bastion_remnant_bridge`）。
 
 ---
 
@@ -216,7 +227,7 @@ int32**（8 字节），按 `x, z, x, z, ...` 平铺。
 
 返回上一次 `find_structures` 写入的结构缓冲区**堆指针**。规则与
 `get_biome_buf` 一致：无参数、指向下批同类调用前有效、按 `>>2` 转 Int32
-下标、每结构 2 个 int32。读取前判 `find_structures` 返回值是否 `> 0`。
+下标、每结构 3 个 int32（`x, z, variant`）。读取前判 `find_structures` 返回值是否 `> 0`。
 
 ---
 
@@ -266,6 +277,31 @@ int32**（8 字节），按 `x, z, x, z, ...` 平铺。
 > 目标版本跑冒烟测试（`set_seed` + 小范围 `gen_biomes_tile`，`count > 0` 即通过）。
 > 仓库内 `cubiomes-master/` 副本内容陈旧，**不可**作为取值依据，须以 workflow
 > 按 master SHA 下载的上游头文件为准。
+
+### 变体与探测扩展 ID
+
+`get_supported_structures(mc)` 除大类外，还会追加以下扩展 ID（自 `FEATURE_NUM`
+起），`find_structures` 可直接传入其中任一 ID 查询；`struct_to_str(id)` 返回的
+名字与前端精灵图 key 一致。**不要硬编码数值**，一律以 `get_supported_structures`
+返回值 + `struct_to_str` 为准。`find_structures` 结果的 `variant` 字段也取自这套 ID。
+
+| 名字（`struct_to_str`）                                         | 所属大类 / 判定依据                            |
+| --------------------------------------------------------------- | ---------------------------------------------- |
+| `village_desert` / `_savanna` / `_snowy` / `_taiga` / `_zombie` | Village（`getVariant` 的 biome + abandoned）   |
+| `bastion_remnant_bridge` / `_stables` / `_treasure` / `_units`  | Bastion（`getVariant` 的 `start`）             |
+| `igloo_basement`                                                | Igloo（`getVariant` 的 `basement`）            |
+| `ruined_portal_giant`                                           | Ruined_Portal（`getVariant` 的 `giant`）       |
+| `ocean_ruin_special`                                            | Ocean_Ruin（该点群系为 `warm_ocean`）          |
+| `end_city_ship`                                                 | End_City（件模拟含 `END_SHIP`）                |
+| `abandoned_camp_secret_chest`                                   | Abandoned_Camp（件模拟含 secret_chest 战利品） |
+| `nether_fossil_ghast`                                           | Nether_Fossil（`netherFossilHasGhast`）        |
+| `slime`                                                         | 史莱姆区块（`isSlimeChunk`，主世界）           |
+| `spawn`                                                         | 出生点（`getSpawn`，主世界）                   |
+| `raw_copper` / `raw_iron`                                       | 大矿脉（`getOreVeinBlockAt`，仅 1.18+，近似）  |
+
+> `monster room`（dungeon 及其 skeleton/spider/zombie 变体）不在 cubiomes
+> 可定位结构之列，故未提供。
+> `stronghold` 走螺旋迭代器（主世界，B1.8+），同样以大类 ID 传入 `find_structures`。
 
 群系 ID（`gen_biomes_tile` 输出值）与官方 `minecraft:worldgen/biome` 注册表
 数值一致（如 `plains=1`、`forest=4`），但该对应**仅适用于 1.18+** 的新注册表；
