@@ -3,8 +3,8 @@
   "commit": "06393cf40f0d4aa30a6db28302ab053037ca785b",
   "commitUrl": "https://github.com/xpple/cubiomes/commit/06393cf40f0d4aa30a6db28302ab053037ca785b",
   "emscripten": "3.1.51",
-  "builtAt": "2026-11-25T06:46:07Z",
-  "runId": "45562926308",
+  "builtAt": "2026-11-27T02:56:51Z",
+  "runId": "45931187494",
   "exports": [
     "set_seed",
     "gen_biomes_tile",
@@ -37,8 +37,8 @@
     },
     "cubiomes.wasm": {
       "downloadUrl": "https://github.com/YGYL2333/MSS-launcher-CI/releases/download/wasm-latest/cubiomes.wasm",
-      "sha256": "af92a416743e2307a5d95f58672f309e6ae228657ccfb82cfb10078f21dc1278",
-      "size": 705053
+      "sha256": "e2340417a801982fdcddc0cee8d61db00e4d4393e97eca19c4c1070815cb0ba3",
+      "size": 1153258
     }
   }
 }
